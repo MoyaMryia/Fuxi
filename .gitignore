@@ -1,0 +1,23 @@
+# 构建与本地产物
+/build/
+/dist/
+__pycache__/
+*.py[cod]
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# 日志与本地草稿
+*.log
+logs/
+local/
+
+# 证据文件默认不入库，仅在正文按文件名引用时白名单化。
+reports/**/*.png
+reports/**/*.json
