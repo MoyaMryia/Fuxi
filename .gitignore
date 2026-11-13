@@ -21,3 +21,4 @@ local/
 # 证据文件默认不入库，仅在正文按文件名引用时白名单化。
 reports/**/*.png
 reports/**/*.json
+reports/**/*.pdf

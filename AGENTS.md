@@ -85,7 +85,7 @@ tools/ci-local.sh --staged  # 提交前检查，pre-commit hook 调用
 提交前运行 `tools/ci-local.sh --staged`。pre-commit hook 调用同一命令。
 首次使用时运行 `tools/install-hooks.sh` 安装 hook，不要用 `--no-verify` 跳过。
 
-- 暂存文件触发对应阶段。文档阶段读暂存区内容，工作区可以保持脏。
+- 暂存文件触发 repo 与 docs 阶段，docs 只检查暂存区中的 Markdown。
 - 一个提交只做一件事。提交说明写做了什么，不写“修复 bug”这类空话。
 
 ## 交付前审查

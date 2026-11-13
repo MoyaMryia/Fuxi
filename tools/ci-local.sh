@@ -21,10 +21,15 @@ stage_repo() {
         fails=1
     fi
 
-    # 单个跟踪文件不超过上限：资产出库，避免再次积累无法清理的历史对象。
+    # 单个跟踪文件不超过上限：按索引中的 blob 体积判断，工作区与暂存区不一致时也能拦住。
     local big
-    big=$(git ls-files -z | xargs -0 -r stat -c '%s %n' 2>/dev/null \
-        | awk -v lim="$MAX_TRACKED_BYTES" '$1 > lim {printf "  %.1f MiB  %s\n", $1/1048576, $2}')
+    big=$(git ls-files -s | while read -r mode sha stage path; do
+        [ -n "$sha" ] || continue
+        size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
+        if [ "$size" -gt "$MAX_TRACKED_BYTES" ]; then
+            awk -v s="$size" -v p="$path" 'BEGIN { printf "  %.1f MiB  %s\n", s / 1048576, p }'
+        fi
+    done)
     if [ -n "$big" ]; then
         echo "以下跟踪文件超过 5 MiB，请移到仓外并加入 .gitignore：" >&2
         echo "$big" >&2
@@ -53,7 +58,7 @@ staged() {
     [ -n "$changed" ] || exit 0
 
     stage_repo
-    # 文档阶段读取暂存区内容，工作区可以保持脏。
+    # 文档阶段只读暂存区内容，工作区可以保持脏。
     stage_docs --staged
 }
 

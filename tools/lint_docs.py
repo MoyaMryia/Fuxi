@@ -14,9 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-FENCE_RE = re.compile(r"^(```|~~~)")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 HEADING_RE = re.compile(r"^(#{1,6}) (.*)$")
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)\)")
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 REPORT_RE = re.compile(r"^reports/[^/]+/(RESULTS|AUDIT|REVIEW)\.md$")
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "tel:", "#")
 
@@ -31,14 +32,14 @@ def tracked_files() -> list[str]:
     return [p for p in git("ls-files", "-z", "*.md").split("\0") if p]
 
 
-def staged_files() -> list[str]:
-    out = git("diff", "--cached", "--name-only", "--diff-filter=AM", "-z", "--", "*.md")
-    return [p for p in out.split("\0") if p]
-
-
 def changed_files(base_ref: str) -> list[str]:
-    out = git("diff", "--name-only", "--diff-filter=AM", "-z", f"{base_ref}..HEAD", "--", "*.md")
+    spec = "--cached" if base_ref == "--staged" else f"{base_ref}..HEAD"
+    out = git("diff", spec, "--name-only", "--diff-filter=AMR", "-z", "--", "*.md")
     return [p for p in out.split("\0") if p]
+
+
+def index_paths() -> set[str]:
+    return {p for p in git("ls-files", "-z").split("\0") if p}
 
 
 def read_staged(path: str) -> str:
@@ -49,20 +50,32 @@ def read_worktree(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def outside_fences(text: str) -> list[tuple[int, str]]:
-    """返回代码围栏之外的行，保留行号。"""
-    rows: list[tuple[int, str]] = []
-    in_fence = False
+def scan(text: str) -> tuple[list[tuple[int, str]], list[int]]:
+    """返回围栏之外的行（带行号）与未闭合围栏的起始行。"""
+    outside: list[tuple[int, str]] = []
+    unclosed: list[int] = []
+    fence: tuple[str, int, int] | None = None
     for number, line in enumerate(text.splitlines(), start=1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if not in_fence:
-            rows.append((number, line))
-    return rows
+        match = FENCE_RE.match(line)
+        if fence is None:
+            if match:
+                marker = match.group(1)
+                fence = (marker[0], len(marker), number)
+                continue
+            outside.append((number, line))
+        elif (
+            match
+            and match.group(1)[0] == fence[0]
+            and len(match.group(1)) >= fence[1]
+            and not match.group(2).strip()
+        ):
+            fence = None
+    if fence is not None:
+        unclosed.append(fence[2])
+    return outside, unclosed
 
 
-def check_structure(path: str, text: str) -> list[str]:
+def check_structure(text: str) -> list[str]:
     problems: list[str] = []
 
     if not text.endswith("\n"):
@@ -70,18 +83,18 @@ def check_structure(path: str, text: str) -> list[str]:
     if text.endswith("\n\n"):
         problems.append("文件末尾有多余空行")
 
-    fence_count = sum(1 for line in text.splitlines() if FENCE_RE.match(line))
-    if fence_count % 2:
-        problems.append(f"代码围栏未闭合（{fence_count} 个）")
+    outside, unclosed = scan(text)
+    for line in unclosed:
+        problems.append(f"第 {line} 行的代码围栏未闭合")
 
-    for number, line in outside_fences(text):
+    for number, line in outside:
         if line != line.rstrip():
             problems.append(f"第 {number} 行有行尾空白")
         if "\t" in line:
             problems.append(f"第 {number} 行含制表符")
 
     headings: list[tuple[int, int]] = []
-    for number, line in outside_fences(text):
+    for number, line in outside:
         match = HEADING_RE.match(line)
         if match:
             headings.append((number, len(match.group(1))))
@@ -101,27 +114,28 @@ def check_structure(path: str, text: str) -> list[str]:
     return problems
 
 
-def check_links(path: str, text: str) -> list[str]:
+def check_links(path: str, text: str, exists) -> list[str]:
     problems: list[str] = []
     base = Path(path).parent
-    for number, line in outside_fences(text):
-        for target in LINK_RE.findall(line):
+    outside, _ = scan(text)
+    for number, line in outside:
+        for target in LINK_RE.findall(INLINE_CODE_RE.sub("", line)):
             if target.startswith(SKIP_SCHEMES):
                 continue
             local = target.split("#", 1)[0]
             if not local:
                 continue
-            if not (base / local).exists():
+            if not exists((base / local).as_posix()):
                 problems.append(f"第 {number} 行的链接目标不存在：{local}")
     return problems
 
 
-def check_report(path: str, text: str) -> list[str]:
-    if not REPORT_RE.match(path):
-        return []
-    if "## 适用范围" not in text:
-        return ["缺少“## 适用范围”一节"]
-    return []
+def check_report(text: str) -> list[str]:
+    outside, _ = scan(text)
+    for _, line in outside:
+        if re.fullmatch(r"## 适用范围\s*", line):
+            return []
+    return ["缺少“## 适用范围”一节"]
 
 
 def main(argv: list[str]) -> int:
@@ -142,22 +156,29 @@ def main(argv: list[str]) -> int:
             print(f"未知参数：{arg}", file=sys.stderr)
             return 2
 
+    worktree_exists = lambda rel: Path(rel).exists()  # noqa: E731
+
     if mode == "all":
         files = tracked_files()
         load = read_worktree
+        exists = worktree_exists
     elif mode == "staged":
-        files = staged_files()
+        files = changed_files("--staged")
         load = read_staged
+        known = index_paths()
+        exists = lambda rel: rel in known or any(p.startswith(rel.rstrip("/") + "/") for p in known)  # noqa: E731
     else:
         files = changed_files(base_ref)
         load = read_worktree
+        exists = worktree_exists
 
     failures = 0
     for path in files:
         text = load(path)
-        problems = check_structure(path, text)
-        problems += check_links(path, text)
-        problems += check_report(path, text)
+        problems = check_structure(text)
+        problems += check_links(path, text, exists)
+        if REPORT_RE.match(path):
+            problems += check_report(text)
         for problem in problems:
             print(f"{path}: {problem}", file=sys.stderr)
         if problems:
